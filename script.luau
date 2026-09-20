@@ -7,9 +7,10 @@ local LP = Players.LocalPlayer
 
 -- === Переменные состояния ===
 local AutoDeliverEnabled = false
+local IsDelivering = false -- Защита от спама телепортами
 
 -- === Защита от дублирования интерфейса ===
-local guiName = "SimpleAutoDeliverGUI"
+local guiName = "SimpleAutoDeliverTPGUI"
 local targetParent = (gethui and gethui()) or CoreGui or LP:FindFirstChild("PlayerGui")
 if targetParent:FindFirstChild(guiName) then
     targetParent[guiName]:Destroy()
@@ -36,7 +37,7 @@ UICorner.Parent = MainFrame
 local Title = Instance.new("TextLabel")
 Title.Size = UDim2.new(1, 0, 0, 35)
 Title.BackgroundTransparency = 1
-Title.Text = "Auto Deliver (TouchInterest)"
+Title.Text = "Auto Deliver (Teleport)"
 Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 14
@@ -94,27 +95,23 @@ end)
 ToggleBtn.MouseButton1Click:Connect(function()
     AutoDeliverEnabled = not AutoDeliverEnabled
     if AutoDeliverEnabled then
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 75) -- Зеленый (Вкл)
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 75) -- Зеленый
         ToggleBtn.Text = "ВЫКЛЮЧИТЬ"
     else
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- Красный (Выкл)
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- Красный
         ToggleBtn.Text = "ВКЛЮЧИТЬ"
     end
 end)
 
-
 -- === ЛОГИКА AUTO DELIVER ===
 
--- 1. Проверяем, несем ли мы что-то (логика из оригинального кода)
 local function isCarrying()
     local char = LP.Character
     if not char then return false end
     
-    -- Проверка атрибутов
     if LP:GetAttribute("Stealing") == true then return true end
     if char:GetAttribute("Stealing") == true then return true end
     
-    -- Проверка флагов (Values)
     for _, name in ipairs({"Carrying", "IsCarrying", "Grabbed", "Holding", "StealHold", "HasGrab"}) do
         local v = char:FindFirstChild(name, true)
         if v then
@@ -124,7 +121,6 @@ local function isCarrying()
         end
     end
     
-    -- Проверка моделей в персонаже
     for _, child in ipairs(char:GetChildren()) do
         if child:IsA("Model") and child:FindFirstChildWhichIsA("BasePart", true) then
             local n = child.Name:lower()
@@ -137,7 +133,6 @@ local function isCarrying()
     return false
 end
 
--- 2. Находим DeliveryHitbox на нашей базе
 local function getMyDeliveryHitbox()
     local plots = workspace:FindFirstChild("Plots")
     if not plots then return nil end
@@ -147,9 +142,7 @@ local function getMyDeliveryHitbox()
             local sign = plot:FindFirstChild("PlotSign")
             local yourBase = sign and sign:FindFirstChild("YourBase")
             
-            -- Если это наша база
             if yourBase and yourBase:IsA("BillboardGui") and yourBase.Enabled == true then
-                -- Ищем DeliveryHitbox
                 local hitbox = plot:FindFirstChild("DeliveryHitbox", true)
                 return hitbox
             end
@@ -158,45 +151,48 @@ local function getMyDeliveryHitbox()
     return nil
 end
 
--- 3. Вызов TouchInterest
-local function deliverItem()
-    if not firetouchinterest then
-        warn("Ваш экзекутор не поддерживает firetouchinterest!")
-        return 
-    end
+local function deliverItemViaTeleport()
+    if IsDelivering then return end
     
     local hitbox = getMyDeliveryHitbox()
     local char = LP.Character
-    if not hitbox or not char then return end
-
-    -- Применяем TouchInterest к HumanoidRootPart
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if hrp then
-        firetouchinterest(hrp, hitbox, 0) -- 0: начало касания
-        task.wait(0.01)
-        firetouchinterest(hrp, hitbox, 1) -- 1: конец касания
-    end
-
-    -- На всякий случай применяем TouchInterest ко всем объектам, которые мы держим
-    for _, child in ipairs(char:GetChildren()) do
-        if child:IsA("Model") or child:IsA("Tool") then
-            local part = child:FindFirstChildWhichIsA("BasePart", true)
-            if part then
-                firetouchinterest(part, hitbox, 0)
-                task.wait(0.01)
-                firetouchinterest(part, hitbox, 1)
-            end
-        end
-    end
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    
+    if not hitbox or not hrp then return end
+    
+    IsDelivering = true
+    
+    task.spawn(function()
+        -- 1. Запоминаем текущую позицию
+        local originalCFrame = hrp.CFrame
+        
+        -- 2. Отключаем физику падения на время ТП, чтобы персонаж не дергался
+        local originalVelocity = hrp.AssemblyLinearVelocity
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        
+        -- 3. Телепортируемся к хитбоксу базы (с небольшим смещением вверх, чтобы не застрять)
+        hrp.CFrame = hitbox.CFrame + Vector3.new(0, 2, 0)
+        
+        -- 4. Ждем, пока сервер засчитает сдачу предмета
+        -- (0.3 секунды обычно достаточно, но если пинг высокий, можно увеличить до 0.5)
+        task.wait(0.35)
+        
+        -- 5. Возвращаемся обратно на оригинальную позицию
+        hrp.CFrame = originalCFrame
+        hrp.AssemblyLinearVelocity = originalVelocity
+        
+        -- 6. Кулдаун, чтобы скрипт не начал телепортировать нас снова, если предмет исчезает с задержкой
+        task.wait(0.5)
+        IsDelivering = false
+    end)
 end
 
--- Основной цикл (каждые 0.2 секунды проверяет состояние)
+-- Основной цикл (проверяет каждые 0.1 сек)
 task.spawn(function()
-    while task.wait(0.2) do
-        if AutoDeliverEnabled then
+    while task.wait(0.1) do
+        if AutoDeliverEnabled and not IsDelivering then
             if isCarrying() then
-                deliverItem()
-                task.wait(1) -- Задержка, чтобы не спамить firetouchinterest десятки раз в секунду
+                deliverItemViaTeleport()
             end
         end
     end
